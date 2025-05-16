@@ -1,258 +1,120 @@
-// security.ts
-import rateLimit from 'express-rate-limit';
-import helmet from 'helmet';
-import sanitizeHtml from 'sanitize-html';
+const express = require("express");
+const cors = require("cors");
+const bodyParser = require("body-parser");
+const { Connection, PublicKey, Keypair, LAMPORTS_PER_SOL } = require("@solana/web3.js");
+const { default: fetch } = require("node-fetch");
 
-export class SecurityManager {
-    private static instance: SecurityManager;
-    private readonly limiter: rateLimit.RateLimit;
-    private readonly apiKey: string;
+const app = express();
+const port = process.env.PORT || 8080;
 
-    private constructor(apiKey: string) {
-        this.apiKey = apiKey;
-        this.limiter = rateLimit({
-            windowMs: 15 * 60 * 1000,
-            max: 100,
-            standardHeaders: true,
-            legacyHeaders: false,
-            handler: (req, res) => {
-                res.status(429).json({
-                    error: 'Too many requests',
-                    retryAfter: Math.ceil((req as any).rateLimit.resetTime / 1000)
-                });
-            }
-        });
-    }
+app.use(cors());
+app.use(bodyParser.json());
 
-    static getInstance(apiKey: string): SecurityManager {
-        if (!SecurityManager.instance) {
-            SecurityManager.instance = new SecurityManager(apiKey);
-        }
-        return SecurityManager.instance;
-    }
+const connection = new Connection("https://api.mainnet-beta.solana.com");
+let isRunning = false;
+let profit = 0;
 
-    sanitizeInput(data: any): any {
-        return Object.keys(data).reduce((sanitized, key) => {
-            sanitized[key] = sanitizeHtml(String(data[key]), {
-                allowedTags: [],
-                allowedAttributes: {}
-            });
-            return sanitized;
-        }, {} as Record<string, string>);
-    }
+// In-memory store
+let ownerWallet = null;
 
-    validateRequest(request: any): boolean {
-        return request && 
-               typeof request === 'object' && 
-               request.apiKey === this.apiKey && 
-               Object.values(request).every(val => val != null);
-    }
-}
-typescript
-Copy
-Edit
-// wallet.ts
-import { Connection, Keypair, PublicKey, sendAndConfirmTransaction, Transaction } from '@solana/web3.js';
-import { SecurityManager } from './security';
+// Dummy trading logic using simulated arbitrage
+async function checkArbitrageOpportunities() {
+  const raydiumPrice = Math.random() * (1.1 - 0.9) + 0.9;
+  const pumpfunPrice = Math.random() * (1.1 - 0.9) + 0.9;
+  const roi = ((raydiumPrice - pumpfunPrice) / pumpfunPrice) * 100;
 
-export class SecureWallet {
-    private connection: Connection;
-    private keypair: Keypair;
-    private security: SecurityManager;
-
-    constructor(walletKey: string, apiKey: string) {
-        this.security = SecurityManager.getInstance(apiKey);
-        const sanitizedKey = this.security.sanitizeInput({ key: walletKey }).key;
-
-        this.keypair = Keypair.fromSecretKey(
-            Buffer.from(sanitizedKey.split(',').map(x => parseInt(x)))
-        );
-
-        this.connection = new Connection(process.env.SOLANA_ENDPOINT || 'https://api.mainnet-beta.solana.com', 'confirmed');
-    }
-
-    async getBalance(): Promise<number> {
-        const balance = await this.connection.getBalance(this.keypair.publicKey);
-        return balance / 1e9;
-    }
-
-    async sendTransaction(tx: Transaction): Promise<string> {
-        try {
-            tx.feePayer = this.keypair.publicKey;
-            tx.recentBlockhash = (await this.connection.getLatestBlockhash()).blockhash;
-            tx.sign(this.keypair);
-            return await sendAndConfirmTransaction(this.connection, tx, [this.keypair]);
-        } catch (err: any) {
-            throw new Error(`Failed to send transaction: ${err.message}`);
-        }
-    }
-
-    getPublicKey(): PublicKey {
-        return this.keypair.publicKey;
-    }
-}
-typescript
-Copy
-Edit
-// trading-bot.ts
-import { Connection, PublicKey, Transaction } from '@solana/web3.js';
-import Redis from 'ioredis';
-import { SecurityManager } from './security';
-import { SecureWallet } from './wallet';
-
-const WHITELISTED_TOKENS = [
-    'So11111111111111111111111111111111111111112', // SOL
-    'Es9vMFrzaCERJJjPRDq6HPucjM7rFt1FQz2eGDvV2wrf', // USDT
-    'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'  // USDC
-];
-
-interface BotConfig {
-    walletPrivateKey: string;
-    apiKey: string;
+  if (roi >= 5) {
+    const mockProfit = Math.random() * 0.01; // up to 0.01 SOL
+    profit += mockProfit;
+    console.log(`[TRADE] Arbitrage executed: ROI=${roi.toFixed(2)}%, Profit=${mockProfit.toFixed(4)} SOL`);
+  }
 }
 
-interface TradeRequest {
-    apiKey: string;
-    ipAddress: string;
-    tokenMint: string;
-    roi: number;
-    dex: 'raydium' | 'pumpfun';
+async function autoTradeLoop() {
+  if (!isRunning) return;
+  await checkArbitrageOpportunities();
+  setTimeout(autoTradeLoop, 15000); // Every 15 seconds
 }
 
-export class SecureTradingBot {
-    private readonly redis: Redis;
-    private readonly security: SecurityManager;
-    private readonly wallet: SecureWallet;
-    private isRunning = false;
-    private readonly minProfitPercentage = 5.0; // Minimum 5% profit
-    private readonly maxSlippage = 0.02; // 2% maximum slippage
-    private readonly maxGasPrice = 1000; // Maximum gas price in SOL per million
+app.post("/start", (req, res) => {
+  ownerWallet = req.body.wallet;
+  if (!ownerWallet) return res.status(400).send("Wallet address required");
+  if (!isRunning) {
+    isRunning = true;
+    autoTradeLoop();
+    console.log("[STARTED] Trading loop started");
+  }
+  res.send("Trading started");
+});
 
-    constructor(config: BotConfig) {
-        this.redis = new Redis({
-            host: process.env.REDIS_HOST,
-            password: process.env.REDIS_PASSWORD,
-            enableReadyCheck: false
-        });
+app.post("/stop", (req, res) => {
+  isRunning = false;
+  console.log("[STOPPED] Trading loop stopped");
+  res.send("Trading stopped");
+});
 
-        this.security = SecurityManager.getInstance(config.apiKey);
-        this.wallet = new SecureWallet(config.walletPrivateKey, config.apiKey);
+app.post("/withdraw", async (req, res) => {
+  if (!ownerWallet) return res.status(400).send("No wallet connected");
+  if (profit <= 0) return res.status(400).send("No profit to withdraw");
+  // In production, send actual transaction. Here we simulate.
+  console.log(`[WITHDRAW] Sent ${profit.toFixed(4)} SOL to ${ownerWallet}`);
+  profit = 0;
+  res.send("Profit withdrawn to your wallet");
+});
+
+app.listen(port, () => {
+  console.log(`Solana Arbitrage Bot backend running on port ${port}`);
+});
+
+// ----------------------------
+// Frontend (App.jsx)
+// ----------------------------
+
+import { useEffect, useState } from "react";
+
+export default function App() {
+  const [wallet, setWallet] = useState(null);
+
+  useEffect(() => {
+    if (window.solana && window.solana.isPhantom) {
+      window.solana.connect({ onlyIfTrusted: true }).then(({ publicKey }) => {
+        setWallet(publicKey.toString());
+      });
     }
+  }, []);
 
-    start() {
-        this.isRunning = true;
-    }
+  const connectWallet = async () => {
+    const resp = await window.solana.connect();
+    setWallet(resp.publicKey.toString());
+  };
 
-    stop() {
-        this.isRunning = false;
-    }
+  const sendCommand = async (cmd) => {
+    if (!wallet) return alert("Connect wallet first");
+    const res = await fetch(`https://your-fly-app-name.fly.dev/${cmd}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wallet })
+    });
+    const text = await res.text();
+    alert(text);
+  };
 
-    async executeTrade(tradeData: TradeRequest): Promise<string> {
-        if (!this.security.validateRequest(tradeData)) {
-            throw new Error('Invalid trade request');
-        }
+  return (
+    <div className="p-6 text-center">
+      <h1 className="text-2xl font-bold mb-4">Solana Arbitrage Dashboard</h1>
+      {wallet ? (
+        <p className="mb-4">Connected: {wallet}</p>
+      ) : (
+        <button onClick={connectWallet} className="bg-blue-500 text-white px-4 py-2 rounded">
+          Connect Phantom Wallet
+        </button>
+      )}
 
-        const key = `trade:${tradeData.ipAddress}`;
-        const count = await this.redis.incr(key);
-        await this.redis.expire(key, 60);
-
-        if (count > 5) throw new Error('Rate limit exceeded');
-        if (!WHITELISTED_TOKENS.includes(tradeData.tokenMint)) throw new Error('Unapproved token');
-        if (tradeData.roi < this.minProfitPercentage) throw new Error('Trade ROI below threshold');
-
-        const tx = new Transaction();
-        const currentPrice = await this.getCurrentPrice(tradeData.tokenMint);
-        const estimatedProfit = await this.calculateProfit(tradeData, currentPrice);
-
-        if (estimatedProfit < this.minProfitPercentage) {
-            throw new Error(`Trade not profitable enough. Estimated profit: ${estimatedProfit}%`);
-        }
-
-        this.verifyTransactionSafety(tx);
-        const signature = await this.wallet.sendTransaction(tx);
-        await this.redis.set(`tx:${signature}`, 'pending', 'EX', 300);
-
-        return signature;
-    }
-
-    private async getCurrentPrice(tokenMint: string): Promise<number> {
-        // Implementation depends on DEX being used
-        return 0; // Replace with actual implementation
-    }
-
-    private async calculateProfit(tradeData: TradeRequest, currentPrice: number): Promise<number> {
-        const estimatedBuyPrice = await this.getEstimatedBuyPrice(tradeData);
-        const estimatedSellPrice = await this.getEstimatedSellPrice(tradeData);
-        
-        const totalFees = estimatedBuyPrice * 0.003 * 2; // 0.3% typical DEX fee
-        const slippageCost = estimatedBuyPrice * this.maxSlippage;
-        
-        const estimatedProfit = estimatedSellPrice - estimatedBuyPrice - totalFees - slippageCost;
-        return (estimatedProfit / estimatedBuyPrice) * 100;
-    }
-
-    private async getEstimatedBuyPrice(tradeData: TradeRequest): Promise<number> {
-        // Implementation depends on DEX being used
-        return 0; // Replace with actual implementation
-    }
-
-    private async getEstimatedSellPrice(tradeData: TradeRequest): Promise<number> {
-        // Implementation depends on DEX being used
-        return 0; // Replace with actual implementation
-    }
-
-    private verifyTransactionSafety(tx: Transaction): void {
-        if (!tx || tx.instructions.length === 0) {
-            throw new Error('Unsafe transaction');
-        }
-    }
-}
-tsx
-Copy
-Edit
-// dashboard.tsx
-import { useEffect, useState } from 'react';
-import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
-import { ConnectionProvider, WalletProvider } from '@solana/wallet-adapter-react';
-import { PhantomWalletAdapter } from '@solana/wallet-adapter-wallets';
-import { clusterApiUrl } from '@solana/web3.js';
-
-const endpoint = clusterApiUrl('mainnet-beta');
-const wallets = [new PhantomWalletAdapter()];
-
-export default function Dashboard() {
-    const [status, setStatus] = useState('stopped');
-
-    const handleBotAction = async (action: 'start' | 'stop' | 'withdraw') => {
-        try {
-            const res = await fetch(`/api/${action}`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': 'Bearer YOUR_API_KEY'
-                }
-            });
-            const data = await res.json();
-            setStatus(data.status);
-        } catch (err) {
-            console.error(err);
-        }
-    };
-
-    return (
-        <ConnectionProvider endpoint={endpoint}>
-            <WalletProvider wallets={wallets} autoConnect>
-                <div className="p-4">
-                    <h1 className="text-xl font-bold mb-4">Solana Trading Bot Control Panel</h1>
-                    <WalletMultiButton />
-                    <div className="mt-4 space-x-2">
-                        <button onClick={() => handleBotAction('start')} className="px-4 py-2 bg-green-600 text-white rounded">Start</button>
-                        <button onClick={() => handleBotAction('stop')} className="px-4 py-2 bg-yellow-500 text-white rounded">Stop</button>
-                        <button onClick={() => handleBotAction('withdraw')} className="px-4 py-2 bg-blue-600 text-white rounded">Withdraw</button>
-                    </div>
-                    <p className="mt-2">Bot status: {status}</p>
-                </div>
-            </WalletProvider>
-        </ConnectionProvider>
-    );
+      <div className="mt-6 space-x-4">
+        <button onClick={() => sendCommand("start")} className="bg-green-500 text-white px-4 py-2 rounded">Start</button>
+        <button onClick={() => sendCommand("stop")} className="bg-yellow-500 text-white px-4 py-2 rounded">Stop</button>
+        <button onClick={() => sendCommand("withdraw")} className="bg-red-500 text-white px-4 py-2 rounded">Withdraw</button>
+      </div>
+    </div>
+  );
 }
